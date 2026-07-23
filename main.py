@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import os
 import psycopg2
@@ -13,6 +14,11 @@ from pydantic import BaseModel
 # Carga la configuración de PostgreSQL almacenada en el archivo .env.
 
 load_dotenv()
+
+
+# Zona horaria oficial utilizada por Ecuador continental.
+
+ZONA_HORARIA_ECUADOR = ZoneInfo("America/Guayaquil")
 
 
 # Crea la aplicación principal de FastAPI.
@@ -63,10 +69,11 @@ class ReporteEmergencia(BaseModel):
     longitud: float
 
 
-# Abre una conexión con la base geoalerta_riobamba.
+# Abre una conexión con PostgreSQL/Supabase y fija la zona horaria
+# de la sesión en America/Guayaquil.
 
 def obtener_conexion():
-    return psycopg2.connect(
+    conexion = psycopg2.connect(
         host=os.getenv("DB_HOST"),
         port=os.getenv("DB_PORT"),
         database=os.getenv("DB_NAME"),
@@ -76,19 +83,52 @@ def obtener_conexion():
         connect_timeout=15,
     )
 
+    with conexion.cursor() as cursor:
+        cursor.execute(
+            "SET TIME ZONE 'America/Guayaquil';"
+        )
+
+    return conexion
+
+
+# Convierte una fecha recuperada desde PostgreSQL a la hora
+# de Ecuador continental antes de enviarla a la aplicación.
+
+def convertir_a_hora_ecuador(
+    fecha_hora: Optional[datetime],
+) -> Optional[datetime]:
+    if fecha_hora is None:
+        return None
+
+    if fecha_hora.tzinfo is None:
+        return fecha_hora.replace(
+            tzinfo=ZONA_HORARIA_ECUADOR,
+        )
+
+    return fecha_hora.astimezone(
+        ZONA_HORARIA_ECUADOR,
+    )
+
+
 # Comprueba rápidamente si el backend está encendido.
 
 @app.get("/")
 def inicio():
     return {
-        "mensaje": "Backend GeoAlerta Riobamba funcionando correctamente"
+        "mensaje": (
+            "Backend GeoAlerta Riobamba "
+            "funcionando correctamente"
+        )
     }
 
 
-# Registra al ciudadano o actualiza sus datos si su cédula ya existe.
+# Registra al ciudadano o actualiza sus datos
+# si su cédula ya existe.
 
 @app.post("/usuarios")
-def registrar_o_actualizar_usuario(usuario: UsuarioRegistro):
+def registrar_o_actualizar_usuario(
+    usuario: UsuarioRegistro,
+):
     conexion = None
     cursor = None
 
@@ -146,7 +186,10 @@ def registrar_o_actualizar_usuario(usuario: UsuarioRegistro):
 
         raise HTTPException(
             status_code=500,
-            detail=f"Error al registrar el usuario: {str(error)}",
+            detail=(
+                "Error al registrar el usuario: "
+                f"{str(error)}"
+            ),
         )
 
     finally:
@@ -157,7 +200,8 @@ def registrar_o_actualizar_usuario(usuario: UsuarioRegistro):
             conexion.close()
 
 
-# Devuelve los ciudadanos registrados para verificar la base.
+# Devuelve los ciudadanos registrados
+# para verificar la base.
 
 @app.get("/usuarios")
 def listar_usuarios():
@@ -168,7 +212,8 @@ def listar_usuarios():
         conexion = obtener_conexion()
         cursor = conexion.cursor()
 
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT
                 id,
                 cedula,
@@ -182,31 +227,38 @@ def listar_usuarios():
                 fecha_actualizacion
             FROM usuarios
             ORDER BY id DESC;
-        """)
+            """
+        )
 
         filas = cursor.fetchall()
         usuarios = []
 
         for fila in filas:
-            usuarios.append({
-                "id": fila[0],
-                "cedula": fila[1],
-                "nombres": fila[2],
-                "apellidos": fila[3],
-                "celular": fila[4],
-                "genero": fila[5],
-                "fecha_nacimiento": fila[6],
-                "celular_contacto_emergencia": fila[7],
-                "fecha_registro": fila[8],
-                "fecha_actualizacion": fila[9],
-            })
+            usuarios.append(
+                {
+                    "id": fila[0],
+                    "cedula": fila[1],
+                    "nombres": fila[2],
+                    "apellidos": fila[3],
+                    "celular": fila[4],
+                    "genero": fila[5],
+                    "fecha_nacimiento": fila[6],
+                    "celular_contacto_emergencia":
+                        fila[7],
+                    "fecha_registro": fila[8],
+                    "fecha_actualizacion": fila[9],
+                }
+            )
 
         return usuarios
 
     except Exception as error:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al listar usuarios: {str(error)}",
+            detail=(
+                "Error al listar usuarios: "
+                f"{str(error)}"
+            ),
         )
 
     finally:
@@ -217,16 +269,26 @@ def listar_usuarios():
             conexion.close()
 
 
-# Guarda una emergencia con sus atributos y geometría Point.
+# Guarda una emergencia con la hora exacta de Ecuador,
+# sus atributos y su geometría Point.
 
 @app.post("/reportes")
-def crear_reporte(reporte: ReporteEmergencia):
+def crear_reporte(
+    reporte: ReporteEmergencia,
+):
     conexion = None
     cursor = None
 
     try:
         conexion = obtener_conexion()
         cursor = conexion.cursor()
+
+        # Se obtiene la hora directamente en Ecuador.
+        # No se depende de la hora de Render ni del teléfono.
+
+        fecha_hora_ecuador = datetime.now(
+            ZONA_HORARIA_ECUADOR,
+        )
 
         consulta = """
         INSERT INTO reportes_emergencia (
@@ -240,14 +302,18 @@ def crear_reporte(reporte: ReporteEmergencia):
             genero,
             fecha_nacimiento,
             celular_contacto_emergencia,
+            fecha_hora,
             latitud,
             longitud,
             ubicacion
         )
         VALUES (
             %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s,
-            ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+            %s, %s, %s, %s, %s, %s,
+            ST_SetSRID(
+                ST_MakePoint(%s, %s),
+                4326
+            )
         )
         RETURNING id;
         """
@@ -263,20 +329,31 @@ def crear_reporte(reporte: ReporteEmergencia):
             reporte.genero,
             reporte.fecha_nacimiento,
             reporte.celular_contacto_emergencia,
+            fecha_hora_ecuador,
             reporte.latitud,
             reporte.longitud,
             reporte.longitud,
             reporte.latitud,
         )
 
-        cursor.execute(consulta, valores)
+        cursor.execute(
+            consulta,
+            valores,
+        )
+
         reporte_id = cursor.fetchone()[0]
 
         conexion.commit()
 
         return {
-            "mensaje": "Reporte registrado correctamente",
+            "mensaje": (
+                "Reporte registrado correctamente"
+            ),
             "id": reporte_id,
+            "fecha_hora":
+                fecha_hora_ecuador.isoformat(),
+            "zona_horaria":
+                "America/Guayaquil",
         }
 
     except Exception as error:
@@ -285,7 +362,10 @@ def crear_reporte(reporte: ReporteEmergencia):
 
         raise HTTPException(
             status_code=500,
-            detail=f"Error al registrar el reporte: {str(error)}",
+            detail=(
+                "Error al registrar el reporte: "
+                f"{str(error)}"
+            ),
         )
 
     finally:
@@ -296,7 +376,8 @@ def crear_reporte(reporte: ReporteEmergencia):
             conexion.close()
 
 
-# Devuelve las emergencias para la app, el mapa y el geoportal.
+# Devuelve las emergencias para la app,
+# el mapa y el geoportal.
 
 @app.get("/reportes")
 def listar_reportes():
@@ -307,7 +388,8 @@ def listar_reportes():
         conexion = obtener_conexion()
         cursor = conexion.cursor()
 
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT
                 id,
                 usuario_id,
@@ -326,36 +408,51 @@ def listar_reportes():
                 longitud
             FROM vista_reportes_emergencia
             ORDER BY fecha_hora DESC;
-        """)
+            """
+        )
 
         filas = cursor.fetchall()
         reportes = []
 
         for fila in filas:
-            reportes.append({
-                "id": fila[0],
-                "usuario_id": fila[1],
-                "tipo_reporte": fila[2],
-                "fecha_hora": fila[3],
-                "descripcion": fila[4],
-                "cedula": fila[5],
-                "nombres": fila[6],
-                "apellidos": fila[7],
-                "celular": fila[8],
-                "genero": fila[9],
-                "fecha_nacimiento": fila[10],
-                "edad": fila[11],
-                "celular_contacto_emergencia": fila[12],
-                "latitud": fila[13],
-                "longitud": fila[14],
-            })
+            reportes.append(
+                {
+                    "id": fila[0],
+                    "usuario_id": fila[1],
+                    "tipo_reporte": fila[2],
+
+                    # La API devuelve la hora convertida
+                    # explícitamente a Ecuador.
+
+                    "fecha_hora":
+                        convertir_a_hora_ecuador(
+                            fila[3],
+                        ),
+
+                    "descripcion": fila[4],
+                    "cedula": fila[5],
+                    "nombres": fila[6],
+                    "apellidos": fila[7],
+                    "celular": fila[8],
+                    "genero": fila[9],
+                    "fecha_nacimiento": fila[10],
+                    "edad": fila[11],
+                    "celular_contacto_emergencia":
+                        fila[12],
+                    "latitud": fila[13],
+                    "longitud": fila[14],
+                }
+            )
 
         return reportes
 
     except Exception as error:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al listar reportes: {str(error)}",
+            detail=(
+                "Error al listar reportes: "
+                f"{str(error)}"
+            ),
         )
 
     finally:
