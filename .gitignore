@@ -1,0 +1,27 @@
+# Entorno virtual
+venv/
+.venv/
+
+# Archivos temporales de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Variables privadas
+.env
+.env.*
+!.env.example
+
+# Respaldos locales
+main_local_backup.py
+
+# Archivos del sistema y editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Registros
+*.log
+.env_*
